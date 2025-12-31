@@ -1,6 +1,6 @@
 package com.pastebinlite.controller;
 
-import com.pastebinlite.model.Paste;
+import com.pastebinlite.entity.Paste;
 import com.pastebinlite.repository.PasteRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,65 +8,47 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import jakarta.servlet.http.HttpServletRequest;
-import java.security.SecureRandom;
-import java.time.Instant;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 @RestController
-@RequestMapping
 public class PasteController {
     
     @Autowired
     private PasteRepository pasteRepository;
     
-    // 🚨 FIXED: Base URL for Railway deployment
     @Value("${app.base-url:http://localhost:8080}")
     private String baseUrl;
-    
-    private final SecureRandom random = new SecureRandom();
     
     @PostMapping("/api/pastes")
     public ResponseEntity<?> createPaste(@RequestBody Map<String, Object> request) {
         String content = (String) request.get("content");
         if (content == null || content.trim().isEmpty()) {
-            return ResponseEntity.badRequest()
-                .body(Map.of("error", "Content is required and cannot be empty"));
+            return ResponseEntity.badRequest().body(Map.of("error", "Content required"));
         }
         
-        Integer ttlSeconds = parseInteger(request.get("ttl_seconds"));
+        Long ttlSeconds = parseLong(request.get("ttl_seconds"));
         Integer maxViews = parseInteger(request.get("max_views"));
         
-        if (ttlSeconds != null && ttlSeconds < 1) {
-            return ResponseEntity.badRequest()
-                .body(Map.of("error", "ttl_seconds must be >= 1"));
-        }
-        if (maxViews != null && maxViews < 1) {
-            return ResponseEntity.badRequest()
-                .body(Map.of("error", "max_views must be >= 1"));
-        }
+        Long expiresAtMs = ttlSeconds != null ? System.currentTimeMillis() + (ttlSeconds * 1000) : null;
         
-        String id = generateId();
-        Paste paste = new Paste(id, content, maxViews, ttlSeconds);
+        String id = UUID.randomUUID().toString().substring(0, 8);
+        Paste paste = new Paste(content, expiresAtMs, maxViews);
+        paste.setId(id);
         pasteRepository.save(paste);
         
-        // 🚨 FIXED: Use baseUrl from application.properties
-        String url = baseUrl.replace("http://localhost:8080", 
-            System.getenv("RAILWAY_PUBLIC_DOMAIN") != null ? 
-            "https://" + System.getenv("RAILWAY_PUBLIC_DOMAIN") : baseUrl) + "/p/" + id;
-        
+        String url = baseUrl + "/p/" + id;
         return ResponseEntity.ok(Map.of("id", id, "url", url));
     }
     
     @GetMapping("/api/pastes/{id}")
-    public ResponseEntity<?> getPaste(@PathVariable String id, 
-                                    HttpServletRequest request) {
-        Instant now = getCurrentTime(request);
+    public ResponseEntity<?> getPaste(@PathVariable String id, HttpServletRequest request) {
+        long now = getCurrentTime(request);
         Optional<Paste> optionalPaste = pasteRepository.findById(id);
         
-        if (optionalPaste.isEmpty() || optionalPaste.get().isExpired(now)) {
+        if (optionalPaste.isEmpty() || isExpired(optionalPaste.get(), now)) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(Map.of("error", "Paste not found or expired"));
         }
@@ -74,107 +56,45 @@ public class PasteController {
         Paste paste = optionalPaste.get();
         if (paste.getRemainingViews() != null && paste.getRemainingViews() <= 0) {
             pasteRepository.delete(paste);
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("error", "Paste not found or expired"));
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Paste expired"));
         }
         
-        if (!paste.decrementView()) {
-            pasteRepository.delete(paste);
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("error", "Paste not found or expired"));
-        }
-        
+        paste.setRemainingViews(paste.getRemainingViews() != null ? paste.getRemainingViews() - 1 : null);
         pasteRepository.save(paste);
+        
         Map<String, Object> response = new HashMap<>();
         response.put("content", paste.getContent());
         response.put("remaining_views", paste.getRemainingViews());
-        response.put("expires_at", paste.getExpiresAt());
+        response.put("expires_at", paste.getExpiresAtMs() != null ? 
+            java.time.Instant.ofEpochMilli(paste.getExpiresAtMs()).toString() : null);
         
         return ResponseEntity.ok(response);
     }
     
-    @GetMapping("/p/{id}")
-    public String viewPaste(@PathVariable String id, HttpServletRequest request) {
-        Instant now = getCurrentTime(request);
-        Optional<Paste> optionalPaste = pasteRepository.findById(id);
-        
-        if (optionalPaste.isEmpty() || optionalPaste.get().isExpired(now)) {
-            return """
-                <!DOCTYPE html>
-                <html><head><title>Not Found</title></head>
-                <body><h1>404 - Paste not found or expired</h1></body></html>
-                """;
+    private long getCurrentTime(HttpServletRequest request) {
+        if ("1".equals(System.getenv("TEST_MODE"))) {
+            String testTime = request.getHeader("x-test-now-ms");
+            if (testTime != null) {
+                try {
+                    return Long.parseLong(testTime);
+                } catch (NumberFormatException ignored) {}
+            }
         }
-        
-        Paste paste = optionalPaste.get();
-        if (paste.getRemainingViews() != null && paste.getRemainingViews() <= 0) {
-            pasteRepository.delete(paste);
-            return """
-                <!DOCTYPE html>
-                <html><head><title>Not Found</title></head>
-                <body><h1>404 - Paste not found or expired</h1></body></html>
-                """;
-        }
-        
-        if (!paste.decrementView()) {
-            pasteRepository.delete(paste);
-            return """
-                <!DOCTYPE html>
-                <html><head><title>Not Found</title></head>
-                <body><h1>404 - Paste not found or expired</h1></body></html>
-                """;
-        }
-        
-        pasteRepository.save(paste);
-        String content = optionalPaste.get().getContent()
-            .replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>");
-        
-        return """
-            <!DOCTYPE html>
-            <html>
-            <head><title>Paste #%s</title>
-            <meta name="viewport" content="width=device-width">
-            <style>
-                body {max-width:800px;margin:50px auto;padding:20px;font-family:monospace;background:#1e1e1e;color:#d4d4d4;}
-                pre {white-space:pre-wrap;word-wrap:break-word;background:#0d1117;padding:20px;border-radius:6px;}
-                h1 {color:#58a6ff;}
-            </style>
-            </head>
-            <body>
-                <h1>Pastebin-Lite</h1>
-                <pre>%s</pre>
-            </body>
-            </html>
-            """.formatted(id, content);
+        return System.currentTimeMillis();
     }
     
-    private String generateId() {
-        byte[] bytes = new byte[6];
-        random.nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    private boolean isExpired(Paste paste, long now) {
+        return (paste.getExpiresAtMs() != null && now >= paste.getExpiresAtMs()) ||
+               (paste.getRemainingViews() != null && paste.getRemainingViews() <= 0);
     }
     
     private Integer parseInteger(Object value) {
         if (value == null) return null;
-        try {
-            return Integer.parseInt(value.toString());
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        try { return Integer.parseInt(value.toString()); } catch (Exception e) { return null; }
     }
     
-    private Instant getCurrentTime(HttpServletRequest request) {
-        String testMode = System.getenv("TEST_MODE");
-        if ("1".equals(testMode)) {
-            String testTime = request.getHeader("x-test-now-ms");
-            if (testTime != null) {
-                try {
-                    return Instant.ofEpochMilli(Long.parseLong(testTime));
-                } catch (NumberFormatException e) {
-                    // Fall back to real time
-                }
-            }
-        }
-        return Instant.now();
+    private Long parseLong(Object value) {
+        if (value == null) return null;
+        try { return Long.parseLong(value.toString()); } catch (Exception e) { return null; }
     }
 }
