@@ -1,16 +1,17 @@
 <!DOCTYPE html>
 <html xmlns:th="http://www.thymeleaf.org">
 <head><title>Pastebin Lite</title>
-<style>body{font-family:Arial;max-width:800px;margin:50px auto;padding:20px;}
+    <style>body{font-family:Arial;max-width:800px;margin:50px auto;padding:20px;}
 textarea{width:100%;height:300px;font-family:monospace;}
-input[type=submit]{background:#007cba;color:white;padding:12px 24px;border:none;cursor:pointer;}</style></head>
+input[type=submit]{background:#007cba;color:white;padding:12px 24px;border:none;cursor:pointer;}
+    </style></head>
 <body>
 <h1>Create Paste</h1>
-<form th:action="@{/}" method="post">
-<textarea name="content" placeholder="Enter text..." required></textarea><br><br>
-<label>TTL (seconds): <input type="number" name="ttlSeconds" min="1"></label><br>
-<label>Max Views: <input type="number" name="maxViews" min="1"></label><br>
-<input type="submit" value="Create Paste">
+<form th:action="@{/api/pastes}" method="post">
+    <textarea name="content" placeholder="Enter text..." required></textarea><br><br>
+    <label>TTL (seconds): <input type="number" name="ttlSeconds" min="1"></label><br>
+    <label>Max Views: <input type="number" name="maxViews" min="1"></label><br>
+    <input type="submit" value="Create Paste">
 </form>
 <div th:if="${error}" style="color:red;" th:text="${error}"></div>
 </body>
